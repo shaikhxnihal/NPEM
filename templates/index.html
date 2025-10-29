@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NPEM Demo</title>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<style>
+  body{font-family:Segoe UI,sans-serif;margin:0;background:#f5f7fa}
+  .container{max-width:1200px;margin:20px auto;padding:20px}
+  .card{background:#fff;border-radius:12px;padding:20px;margin-bottom:20px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+  h1{color:#2c3e50;text-align:center}
+  .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  button{padding:12px 24px;font-size:16px;border:none;border-radius:8px;cursor:pointer}
+  .btn-primary{background:#3498db;color:#fff}
+  .btn-primary:disabled{background:#95a5a6;cursor:not-allowed}
+  .status{font-weight:bold;color:#2c3e50}
+  .chip{display:inline-block;padding:6px 12px;margin:4px;border-radius:20px;background:#e0e0e0;font-size:14px}
+  .progress-container{width:100%;background:#ecf0f1;border-radius:8px;overflow:hidden;margin:10px 0}
+  .progress-bar{height:20px;background:#3498db;width:0%;transition:width .3s}
+  #chart{width:100%;height:500px}
+  .footer{text-align:center;color:#7f8c8d;font-size:14px;margin-top:30px}
+</style></head><body>
+<div class="container">
+<h1>NPEM: Neural Plasticity Echo Memory</h1>
+<p style="text-align:center;color:#7f8c8d">Continual Learning on Permuted MNIST</p>
+
+<div class="card"><div class="controls">
+  <label><strong>Tasks:</strong></label>
+  <input type="range" id="taskSlider" min="1" max="5" value="3" style="width:200px">
+  <span id="taskValue">3</span>
+  <button id="startBtn" class="btn-primary">Start Training</button>
+</div></div>
+
+<div class="card">
+  <div class="status" id="status">Status: idle</div>
+  <div id="epochInfo"></div>
+  <div class="progress-container"><div class="progress-bar" id="progressBar"></div></div>
+  <div id="accuracies"></div>
+</div>
+
+<div class="card"><div id="chart"></div></div>
+
+<div class="card" id="resultsCard" style="display:none">
+  <h3>Final Results</h3>
+  <div id="finalResults"></div>
+  <button id="downloadBtn" class="btn-primary">Download Plot</button>
+</div>
+
+<div class="card" id="testCard" style="display:none">
+  <h3>Test the Trained Model</h3>
+  <div style="display:flex;gap:20px;flex-wrap:wrap">
+    <div>
+      <canvas id="drawCanvas" width="280" height="280"
+              style="border:2px solid #bbb;background:#fff;cursor:crosshair"></canvas>
+      <div style="margin-top:8px"><button id="clearBtn" class="btn-primary" style="padding:6px 12px">Clear</button></div>
+    </div>
+    <div style="flex:1;min-width:250px">
+      <label><strong>Task (permutation):</strong></label>
+      <select id="taskSelect" style="width:100%;padding:6px;margin:6px 0"></select>
+      <button id="predictBtn" class="btn-primary" style="width:100%;margin-top:12px">Predict Digit</button>
+      <div id="predictionResult" style="margin-top:16px;font-weight:bold"></div>
+      <div id="probChart" style="height:180px;margin-top:12px"></div>
+      <h4 style="margin-top:20px">Prediction History</h4>
+      <div id="historyList" style="max-height:150px;overflow-y:auto;font-size:14px"></div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">NPEM Demo – Real-time + Interactive Testing</div>
+</div>
+
+<script>
+  // ----- ELEMENTS -----
+  const taskSlider=document.getElementById('taskSlider'),taskValue=document.getElementById('taskValue'),
+        startBtn=document.getElementById('startBtn'),statusEl=document.getElementById('status'),
+        epochInfo=document.getElementById('epochInfo'),progressBar=document.getElementById('progressBar'),
+        accuraciesEl=document.getElementById('accuracies'),resultsCard=document.getElementById('resultsCard'),
+        finalResults=document.getElementById('finalResults'),downloadBtn=document.getElementById('downloadBtn'),
+        testCard=document.getElementById('testCard'),taskSelect=document.getElementById('taskSelect'),
+        predictBtn=document.getElementById('predictBtn'),predictionRes=document.getElementById('predictionResult'),
+        probChartDiv=document.getElementById('probChart'),historyList=document.getElementById('historyList'),
+        canvas=document.getElementById('drawCanvas'),clearBtn=document.getElementById('clearBtn');
+
+  taskSlider.oninput=()=>taskValue.textContent=taskSlider.value;
+
+  // ----- LIVE ACCURACY CHART -----
+  let chartInit=false,plotData=[];
+  function initChart(){
+    const n=parseInt(taskSlider.value);
+    plotData=Array.from({length:n},(_,i)=>({x:[],y:[],mode:'lines+markers',name:`Task ${i+1}`,line:{width:4},marker:{size:10}}));
+    Plotly.newPlot('chart',plotData,{title:'Live Accuracy Over Tasks',
+      xaxis:{title:'After Learning Task #'},yaxis:{title:'Accuracy (%)',range:[0,100]},
+      hovermode:'x unified',legend:{x:0,y:1}},{responsive:true});
+    chartInit = true;
+  }
+
+  // ----- START TRAINING -----
+  startBtn.onclick=async()=>{
+    if(startBtn.disabled)return;
+    startBtn.disabled=true; startBtn.textContent='Training...';
+    resultsCard.style.display='none'; testCard.style.display='none';
+    initChart();
+    const r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},
+                 body:JSON.stringify({num_tasks:parseInt(taskSlider.value)})});
+    if(!r.ok){alert('Failed');startBtn.disabled=false;startBtn.textContent='Start Training';}
+  };
+
+  // ----- PROGRESS POLLING -----
+  setInterval(async()=>{
+    const p=await fetch('/progress').then(r=>r.json());
+    statusEl.textContent=`Status: ${p.status}`;
+    epochInfo.textContent=p.status.includes('Training')?`Epoch: ${p.epoch}/50 | Loss: ${p.loss.toFixed(4)}`:'';
+    progressBar.style.width=p.status.includes('Training')?`${(p.epoch/50)*100}%`:'0%';
+    accuraciesEl.innerHTML=''; p.accuracies.forEach((a,i)=>{
+      const c=document.createElement('span'); c.className='chip';
+      c.textContent=`Task ${i+1}: ${a}`;
+      c.style.background=`hsl(${(i*360/p.accuracies.length)},70%,80%)`;
+      accuraciesEl.appendChild(c);
+    });
+    if(p.status==='complete'){
+      startBtn.disabled=false; startBtn.textContent='Start Training';
+      fetchResults(); showTestPanel(parseInt(taskSlider.value));
+    }
+  },800);
+
+  // ----- LIVE CHART STREAM -----
+  const es=new EventSource('/stream');
+  es.onmessage=e=>{
+    const h=JSON.parse(e.data);
+    if(!chartInit)return;
+    plotData.forEach((t,tid)=>{
+      t.x=[]; t.y=[];
+      for(let i=tid;i<h.length;i++) if(h[i][tid]!==undefined){t.x.push(i+1); t.y.push(h[i][tid]);}
+    });
+    Plotly.react('chart',plotData,Plotly.d3.select('#chart').data()[0].layout);
+  };
+
+  // ----- FINAL RESULTS -----
+  async function fetchResults(){
+    const r=await fetch('/results').then(j=>j.json());
+    let html='<p><strong>Final Accuracies:</strong></p>';
+    for(const [k,v] of Object.entries(r.final_accuracies))
+      html+=`<span class="chip" style="background:hsl(${parseInt(k.split(' ')[1])*70},70%,80%)">${k}: ${v}</span>`;
+    html+=`<p><strong>Average: ${r.average}</strong></p>`;
+    finalResults.innerHTML=html; resultsCard.style.display='block';
+  }
+  downloadBtn.onclick=()=>location.href='/download_plot';
+
+  // ----- TEST PANEL -----
+  function showTestPanel(n){
+    taskSelect.innerHTML=''; for(let i=0;i<n;i++){
+      const o=document.createElement('option'); o.value=i; o.textContent=`Task ${i+1}`; taskSelect.appendChild(o);
+    }
+    testCard.style.display='block';
+  }
+
+  // ----- CANVAS -----
+  const ctx=canvas.getContext('2d'); ctx.lineWidth=20; ctx.lineCap='round';
+  let drawing=false;
+  canvas.addEventListener('mousedown',e=>{drawing=true;draw(e);});
+  canvas.addEventListener('mousemove',draw);
+  canvas.addEventListener('mouseup',()=>{drawing=false;});
+  canvas.addEventListener('mouseout',()=>{drawing=false;});
+  function draw(e){
+    if(!drawing)return;
+    const r=canvas.getBoundingClientRect();
+    ctx.beginPath();
+    ctx.moveTo(e.clientX-r.left,e.clientY-r.top);
+    ctx.lineTo(e.clientX-r.left,e.clientY-r.top);
+    ctx.stroke();
+  }
+  clearBtn.onclick=()=>{ctx.clearRect(0,0,canvas.width,canvas.height);};
+
+  // ----- PREDICT -----
+  predictBtn.onclick = async () => {
+  // 1. Get canvas
+  const canvas = document.getElementById('drawCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // 2. Create 28x28 canvas
+  const smallCanvas = document.createElement('canvas');
+  smallCanvas.width = 28;
+  smallCanvas.height = 28;
+  const smallCtx = smallCanvas.getContext('2d');
+
+  // 3. Draw resized (center-crop + scale)
+  smallCtx.imageSmoothingEnabled = true;
+  smallCtx.drawImage(canvas, 0, 0, 280, 280, 0, 0, 28, 28);
+
+  // 4. Convert to grayscale + binarize
+  const imgData = smallCtx.getImageData(0, 0, 28, 28);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+    const value = gray > 128 ? 255 : 0;
+    data[i] = data[i+1] = data[i+2] = value;
+  }
+  smallCtx.putImageData(imgData, 0, 0);
+
+  // 5. Send as PNG
+  const dataUrl = smallCanvas.toDataURL('image/png');
+
+  const payload = { image: dataUrl, task_id: parseInt(taskSelect.value) };
+
+  const resp = await fetch('/predict', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!resp.ok) { alert('Prediction error'); return; }
+  const out = await resp.json();
+
+  predictionRes.innerHTML = `Predicted: <strong>${out.digit}</strong> (${out.confidence})`;
+
+  const bars = Object.entries(out.probabilities).map(([d, p]) => ({
+    x: [d], y: [parseFloat(p)], type: 'bar'
+  }));
+  Plotly.newPlot(probChartDiv, bars, {
+    title: 'Confidence per Digit',
+    xaxis: { title: 'Digit' },
+    yaxis: { title: 'Probability', range: [0, 1] }
+  }, { responsive: true });
+
+  const entry = `Task ${payload.task_id + 1} to ${out.digit} (${out.confidence})`;
+  const li = document.createElement('div');
+  li.textContent = entry;
+  li.style.padding = '4px 0';
+  historyList.prepend(li);
+};
+</script></body></html>
